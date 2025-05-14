@@ -1,0 +1,71 @@
+#include "Structures.fxh"
+
+Texture2D    g_Textures[NUM_TEXTURES];
+SamplerState g_Samplers[NUM_SAMPLERS];
+
+ConstantBuffer<GlobalConstants>   g_Constants;
+StructuredBuffer<MaterialAttribs> g_MaterialAttribs;
+TextureCube    g_ReflectionMap;  // Textura cúbica para reflejos
+SamplerState   g_ReflectionSampler;
+
+struct PSInput
+{
+    float4 Pos  : SV_POSITION;
+    float4 WPos : WORLD_POS;   // Posición en espacio mundial
+    float3 Norm : NORMAL;      // Normal en espacio mundial
+    float2 UV   : TEX_COORD;
+    nointerpolation uint MatId : MATERIAL; // ID de material
+};
+
+struct PSOutput
+{
+    float4 Color : SV_Target0; // RGBA8 unorm
+    float4 Norm  : SV_Target1; // RGBA16 float
+};
+
+void main(in  PSInput  PSIn,
+          out PSOutput PSOut)
+{
+    MaterialAttribs material = g_MaterialAttribs[PSIn.MatId]; // Corregido MatId
+    
+    // Color base fijo
+    float3 baseColor = material.BaseColorMask.rgb;
+    
+    // Muestrear normal map si está presente
+    float3 N = normalize(PSIn.Norm); // Corregido Norm
+    if (material.NormalMapTexInd >= 0)
+    {
+        float3 normalMap = g_Textures[NonUniformResourceIndex(material.NormalMapTexInd)]
+            .Sample(g_Samplers[NonUniformResourceIndex(material.SampInd)], PSIn.UV).rgb;
+        
+        // Calcular TBN usando generación de tangente
+        float3 tangent = normalize(cross(N, float3(0, 0, 1))); // Generar tangente
+        float3 bitangent = cross(N, tangent);
+        float3x3 TBN = float3x3(tangent, bitangent, N);
+        
+        N = normalize(mul(normalMap * 2.0 - 1.0, TBN)); // Usar normal del mapa
+    }
+
+    // Calcular la dirección de reflexión para el agua
+    float3 reflectDir = reflect(normalize(PSIn.WPos.xyz - g_Constants.CameraPos.xyz), N);
+    float4 reflectionColor = g_ReflectionMap.Sample(g_ReflectionSampler, reflectDir);
+    
+    // Suavizar el reflejo (esto depende de la reflectividad del material)
+    float reflectionFactor = material.Reflectivity; // Esto se puede ajustar para el efecto de agua
+    PSOut.Color.rgb = lerp(baseColor, reflectionColor.rgb, reflectionFactor);
+
+    // Añadir transparencia para simular agua
+    PSOut.Color.a = material.Transparency;
+
+    // Cálculo de Fresnel (efecto de agua más realista)
+    float3 ViewRayDir = normalize(g_Constants.CameraPos.xyz - PSIn.WPos.xyz);
+    float NdotV = dot(N, ViewRayDir);
+    float R0 = 0.04;
+    float fresnelTerm = lerp(R0, 1.0, pow(1.0 - NdotV, 5.0));  // Uso de la aproximación de Schlick
+
+    // Mezcla entre reflejo y color base usando el término de Fresnel
+    PSOut.Color.rgb = lerp(PSOut.Color.rgb, reflectionColor.rgb, fresnelTerm);
+
+    // Escribir la normal y la reflectividad en el G-buffer
+    PSOut.Norm = float4(N * 0.5 + 0.5, material.Reflectivity); // Normal + reflectividad
+}

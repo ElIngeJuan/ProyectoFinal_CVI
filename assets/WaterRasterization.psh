@@ -1,0 +1,111 @@
+// Water shader adapted for cube using original Structures.fxh setup
+
+#include "Structures.fxh"
+
+// Existing resources
+Texture2D    g_Textures[NUM_TEXTURES];
+SamplerState g_Samplers[NUM_SAMPLERS];
+
+ConstantBuffer<GlobalConstants>   g_Constants;
+StructuredBuffer<MaterialAttribs> g_MaterialAttribs;
+TextureCube    g_ReflectionMap;  // Textura cúbica para reflejos
+SamplerState   g_ReflectionSampler;
+
+// Nueva normal map para el agua
+Texture2D    g_WaterNormalMap : register(t10);
+
+cbuffer WaterCB
+{
+    float g_Time;
+    float2 g_UVSpeed;    // velocidad de desplazamiento de UV
+    float  g_Reflectivity; // factor de mezcla de reflejo
+};
+
+struct VSInput
+{
+    float3 Pos   : ATTRIB0;
+    float3 Normal: ATTRIB1;
+    float2 UV    : ATTRIB2;
+};
+
+struct VSOutput
+{
+    float4 Pos   : SV_POSITION;
+    float4 WPos  : WORLD_POS;
+    float3 Norm  : NORMAL;
+    float2 UV    : TEX_COORD;
+    nointerpolation uint MatId : MATERIAL;
+};
+
+// Vertex Shader
+VSOutput VSMain(VSInput input, uint VertId : SV_VertexID)
+{
+    VSOutput output;
+    // Calcula posición en mundo
+    float4 worldPos = mul(float4(input.Pos, 1.0), g_Constants.World);
+    output.WPos     = worldPos;
+    // Proyección
+    output.Pos      = mul(worldPos, g_Constants.WorldViewProj);
+    output.Norm     = normalize(mul(float4(input.Normal, 0.0), g_Constants.World).xyz);
+    // Desplazamiento de UV animado
+    output.UV       = input.UV + g_Time * g_UVSpeed;
+    // Asumimos MatId 0 para agua
+    output.MatId    = 0;
+    return output;
+}
+
+// Pixel Shader
+struct PSIn
+{
+    float4 Pos   : SV_POSITION;
+    float4 WPos  : WORLD_POS;
+    float3 Norm  : NORMAL;
+    float2 UV    : TEX_COORD;
+    nointerpolation uint MatId : MATERIAL;
+};
+
+struct PSOut
+{
+    float4 Color : SV_Target0;
+    float4 Norm  : SV_Target1;
+};
+
+PSOut PSMain(PSIn PSIn)
+{
+    PSOut PSOut;
+
+    // Muestrea normal map para perturbación
+    float3 nrmSample = g_WaterNormalMap.Sample(
+        g_Samplers[PSIn.MatId], PSIn.UV).xyz * 2.0 - 1.0;
+    float3 perturbedNormal = normalize(nrmSample);
+
+    // Dirección de vista
+    float3 viewDir = normalize(g_Constants.CameraPos - PSIn.WPos.xyz);
+    // Reflejo
+    float3 reflDir = reflect(-viewDir, perturbedNormal);
+    float4 reflectionColor = g_ReflectionMap.Sample(g_ReflectionSampler, reflDir);
+
+    // Color base del material (transparentes azulados)
+    float4 baseColor = float4(0.0, 0.3, 0.5, 0.5);
+
+    // Mezcla base + reflejo
+    PSOut.Color = lerp(baseColor, reflectionColor, g_Reflectivity);
+
+    // Normal en output
+    PSOut.Norm = float4(perturbedNormal, 0.0);
+
+    return PSOut;
+}
+
+// Técnica y pases
+
+Technique WaterCubeTech
+{
+    Pass P0
+    {
+        SetVertexShader(   CompileShader(VS, VSMain()));
+        SetPixelShader(    CompileShader(PS, PSMain()));
+        SetBlendState(     AlphaBlend );
+        SetDepthStencilState( DepthEnable, DepthWriteDisable );
+    }
+}

@@ -1,0 +1,69 @@
+#include "Structures.fxh"
+#include "Utils.fxh"
+
+ConstantBuffer<GlobalConstants> g_Constants;
+
+Texture2D g_GBuffer_Color;
+Texture2D g_GBuffer_Normal;
+Texture2D g_GBuffer_Depth;
+Texture2D g_RayTracedTex;
+
+struct PSInput 
+{ 
+    float4 Pos : SV_POSITION; 
+    float2 UV  : TEX_COORD; 
+};
+
+float4 main(in PSInput PSIn) : SV_Target
+{
+    float2 Dim;
+    g_GBuffer_Color.GetDimensions(Dim.x, Dim.y);
+
+    // Revertir la coordenada Y para asegurar que esté correctamente orientada
+    float2 ScreenUV = float2(PSIn.UV.x, 1.0 - PSIn.UV.y);
+
+    // Leer los valores del G-Buffer y los resultados del ray tracing
+    int3 TexelPos = int3(ScreenUV * Dim, 0);
+    float4 Color = g_GBuffer_Color.Load(TexelPos);
+    float3 Normal = g_GBuffer_Normal.Load(TexelPos).xyz;
+    float Depth = g_GBuffer_Depth.Load(TexelPos).x;
+    float4 RTColor = g_RayTracedTex.Load(TexelPos);
+
+    // Reconstruir la posición mundial
+    float3 WPos = ScreenPosToWorldPos(PSIn.Pos.xy / Dim, Depth, g_Constants.ViewProjInv);
+
+    // Calcular el término de Fresnel (reflexión)
+    float3 ViewRayDir = normalize(WPos.xyz - g_Constants.CameraPos.xyz);
+    float R = 0.0;
+    if (Depth < 1.0)
+    {
+        // Usar la aproximación de Schlick para el término Fresnel
+        float NdotV = dot(Normal, -ViewRayDir);
+        float R0 = 0.04;
+        R = lerp(R0, 1.0, pow(1 - NdotV, 5.0));  // Interpolación para reflejos más fuertes al acercarse a la superficie
+    }
+    else
+    {
+        // Fondo, si el Depth es 1, asume que es el cielo
+        Color = GetSkyColor(ViewRayDir, g_Constants.LightDir.xyz);
+    }
+
+    // Dependiendo del modo de renderizado, elegir el resultado adecuado
+    switch (g_Constants.DrawMode)
+    {
+        case RENDER_MODE_SHADED:
+            return lerp(Color * RTColor.a, RTColor, R);  // Combina la iluminación con el reflejo
+        case RENDER_MODE_G_BUFFER_COLOR:
+            return Color;  // Sólo el color del G-Buffer
+        case RENDER_MODE_G_BUFFER_NORMAL:
+            return float4(abs(Normal.xyz), 1.0);  // Muestra las normales (para depuración)
+        case RENDER_MODE_DIFFUSE_LIGHTING:
+            return Color * RTColor.a;  // Aplicar iluminación difusa
+        case RENDER_MODE_REFLECTIONS:
+            return RTColor;  // Sólo los reflejos calculados
+        case RENDER_MODE_FRESNEL_TERM:
+            return float4(R, R, R, 1.0);  // Mostrar sólo el valor de Fresnel para depuración
+    }
+
+    return Color;  // En caso de que no se haya definido ningún modo de renderizado
+}
