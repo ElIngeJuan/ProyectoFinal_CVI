@@ -38,18 +38,20 @@
 namespace Diligent
 {
 
-static_assert(sizeof(HLSL::GlobalConstants) % 16 == 0, "Structure must be 16-byte aligned");
 static_assert(sizeof(HLSL::ObjectConstants) % 16 == 0, "Structure must be 16-byte aligned");
 
 SampleBase* CreateSample()
 {
     return new Tutorial22_HybridRendering();
 }
+float  m_CurrentTime     = 0.0;
+Uint32 m_WaterMaterialId = 0;
 
 void Tutorial22_HybridRendering::CreateSceneMaterials(uint2& CubeMaterialRange, Uint32& GroundMaterial, std::vector<HLSL::MaterialAttribs>& Materials)
 {
     Uint32 AnisotropicClampSampInd = 0;
     Uint32 AnisotropicWrapSampInd  = 0;
+
 
     // Create samplers
     {
@@ -112,20 +114,24 @@ void Tutorial22_HybridRendering::CreateSceneMaterials(uint2& CubeMaterialRange, 
         mtr.BaseColorTexInd = -1;                                        // Sin textura de color
         mtr.NormalMapTexInd = static_cast<int>(m_Scene.Textures.size()); // Índice del normal map
         m_Scene.Textures.push_back(NormalTex);
-        mtr.Reflectivity = 0.8f;
-        mtr.Transparency = 0.3f;
-        mtr.FresnelPower = 5.0f;
+        mtr.Reflectivity    = 0.7f;
+        mtr.Transparency    = 0.8f;  // Nivel de transparencia
+        mtr.RefractiveIndex = 1.33f; // Índice de refracción del agua
+        mtr.FresnelPower    = 5.0f;
         Materials.push_back(mtr);
     };
 
     // Material de agua
     CubeMaterialRange.x = static_cast<Uint32>(Materials.size());
     CreateWaterMaterial("WaterNormalMap.png", AnisotropicWrapSampInd);
-    CubeMaterialRange.y = static_cast<Uint32>(Materials.size());
 
     // Ground material
     GroundMaterial = static_cast<Uint32>(Materials.size());
     LoadMaterial("Marble.jpg", float4{1.f}, AnisotropicWrapSampInd);
+    
+    CubeMaterialRange.x = static_cast<Uint32>(Materials.size());
+    LoadMaterial("Material.png", float4{1.f}, AnisotropicWrapSampInd);
+    CubeMaterialRange.y = static_cast<Uint32>(Materials.size());
 }
 
 Tutorial22_HybridRendering::Mesh Tutorial22_HybridRendering::CreateTexturedPlaneMesh(IRenderDevice* pDevice, float2 UVScale)
@@ -270,14 +276,17 @@ void Tutorial22_HybridRendering::CreateSceneObjects(const uint2 CubeMaterialRang
         m_Scene.Meshes.push_back(PlaneMesh);
     }
 
-    // Create cube objects
-    const auto AddCubeObject = [&](float Angle, float X, float Y, float Z, float Scale, bool IsDynamic = false, bool NoMaterial = false) //
-    {
-
+    // 1. Primero modificamos la función AddCubeObject para aceptar escalas independientes
+    const auto AddCubeObject = [&](float Angle, float X, float Y, float Z,
+                                   float ScaleX, float ScaleY, float ScaleZ,
+                                   bool IsDynamic = false, Uint32 MaterialId = 1) {
         HLSL::ObjectAttribs obj;
-        obj.ModelMat      = float4x4::Scale(5.0f); // Cubo de 5x5x5
+        obj.ModelMat    = (float4x4::RotationY(Angle) *
+                        float4x4::Translation(X, Y, Z) *
+                        float4x4::Scale(ScaleX, ScaleY, ScaleZ));
+        obj.ModelMat    = obj.ModelMat.Transpose();
         obj.NormalMat   = float3x3::Identity();
-        obj.MaterialId    = 0;
+        obj.MaterialId  = MaterialId;
         obj.MeshId      = CubeMeshId;
         obj.FirstIndex  = m_Scene.Meshes[CubeMeshId].FirstIndex;
         obj.FirstVertex = m_Scene.Meshes[CubeMeshId].FirstVertex;
@@ -291,11 +300,85 @@ void Tutorial22_HybridRendering::CreateSceneObjects(const uint2 CubeMaterialRang
         }
     };
 
-    // clang-format off
+    // 2. Creamos una función específica para agregar planos de agua
+    const auto AddWaterPlane = [&](float X, float Y, float Z, float SizeX, float SizeZ, Uint32 MaterialId) {
+        HLSL::ObjectAttribs waterObj;
+        waterObj.ModelMat = float4x4::Translation(X, Y, Z) *
+            float4x4::Scale(SizeX, 1.0f, SizeZ);
+        waterObj.ModelMat    = waterObj.ModelMat.Transpose();
+        waterObj.NormalMat   = float3x3::Identity();
+        waterObj.MaterialId  = MaterialId;
+        waterObj.MeshId      = PlaneMeshId;
+        waterObj.FirstIndex  = m_Scene.Meshes[waterObj.MeshId].FirstIndex;
+        waterObj.FirstVertex = m_Scene.Meshes[waterObj.MeshId].FirstVertex;
+        m_Scene.Objects.push_back(waterObj);
+    };
+    
+    // 2. Paredes ajustadas (sin traslapes)
+    // Pared frontal (Z positivo)
+    AddCubeObject(
+        0.0f,  // Ángulo de rotación (0 = sin rotar)
+        0.0f,  // Posición X (centrado)
+        0.0f,  // Posición Y (mitad de altura si wallHeight = 3.0f)
+        8.5f,  // Posición Z (borde exterior: 15/2 + 0.8/2 = 7.5 + 0.4)
+        7.2f, // Ancho (containerSize - wallThickness = 15.0 - 0.8)
+        3.0f,  // Altura de la pared (wallHeight)
+        0.8f,  // Grosor de la pared (wallThickness)
+        false, // No es dinámico
+        3      // ID del material (ej. piedra)
+    );
 
-    // Se crean las instancias de los cubos
-    AddCubeObject(0.28f,  0.7f, 1.00f,  3.0f, 1.3f, false, false);
-    // clang-format on
+    AddCubeObject(
+        0.0f,  // Ángulo de rotación (0 = sin rotar)
+        0.0f,  // Posición X (centrado)
+        0.0f,  // Posición Y (mitad de altura si wallHeight = 3.0f)
+        -8.5f,  // Posición Z (borde exterior: 15/2 + 0.8/2 = 7.5 + 0.4)
+        7.2f, // Ancho (containerSize - wallThickness = 15.0 - 0.8)
+        3.0f,  // Altura de la pared (wallHeight)
+        0.8f,  // Grosor de la pared (wallThickness)
+        false, // No es dinámico
+        3      // ID del material (ej. piedra)
+    );
+
+    AddCubeObject(
+        0.0f,  // Ángulo de rotación (0 = sin rotar)
+        8.5f,  // Posición X (centrado)
+        0.0f,  // Posición Y (mitad de altura si wallHeight = 3.0f)
+        0.0f, // Posición Z (borde exterior: 15/2 + 0.8/2 = 7.5 + 0.4)
+        0.8f,  // Ancho (containerSize - wallThickness = 15.0 - 0.8)
+        3.0f,  // Altura de la pared (wallHeight)
+        7.2f,  // Grosor de la pared (wallThickness)
+        false, // No es dinámico
+        3      // ID del material (ej. piedra)
+    );
+
+    AddCubeObject(
+        0.0f,  // Ángulo de rotación (0 = sin rotar)
+        -8.5f,  // Posición X (centrado)
+        0.0f,  // Posición Y (mitad de altura si wallHeight = 3.0f)
+        0.0f,  // Posición Z (borde exterior: 15/2 + 0.8/2 = 7.5 + 0.4)
+        0.8f,  // Ancho (containerSize - wallThickness = 15.0 - 0.8)
+        3.0f,  // Altura de la pared (wallHeight)
+        7.2f,  // Grosor de la pared (wallThickness)
+        false, // No es dinámico
+        3      // ID del material (ej. piedra)
+    );
+
+    // 3. Agua encima (plano flotante)
+    auto         waterMesh   = CreateTexturedPlaneMesh(m_pDevice, float2{20});
+    const Uint32 waterMeshId = static_cast<Uint32>(m_Scene.Meshes.size());
+    m_Scene.Meshes.push_back(waterMesh);
+
+    HLSL::ObjectAttribs water;
+    water.ModelMat = float4x4::Translation(0.0f, 20.0f, 0.0f) * // 0.1 unidades arriba
+        float4x4::Scale(7.0f, .1f, 7.0f);
+    water.ModelMat    = water.ModelMat.Transpose();
+    water.NormalMat   = float3x3::Identity();
+    water.MaterialId  = m_WaterMaterialId;
+    water.MeshId      = waterMeshId;
+    water.FirstIndex  = waterMesh.FirstIndex;
+    water.FirstVertex = waterMesh.FirstVertex;
+    m_Scene.Objects.push_back(water);
 
     InstancedObjects InstObj;
     InstObj.MeshInd             = CubeMeshId;
@@ -318,7 +401,6 @@ void Tutorial22_HybridRendering::CreateSceneObjects(const uint2 CubeMaterialRang
     }
     InstObj.NumObjects = static_cast<Uint32>(m_Scene.Objects.size()) - InstObj.ObjectAttribsOffset;
     m_Scene.ObjectInstances.push_back(InstObj);
-
 }
 
 void Tutorial22_HybridRendering::CreateSceneAccelStructs()
@@ -853,13 +935,15 @@ void Tutorial22_HybridRendering::Render()
         const auto ViewProj = m_Camera.GetViewMatrix() * m_Camera.GetProjMatrix();
 
         HLSL::GlobalConstants GConst;
-        GConst.ViewProj     = ViewProj.Transpose();
-        GConst.ViewProjInv  = ViewProj.Inverse().Transpose();
-        GConst.LightDir     = normalize(-m_LightDir);
-        GConst.CameraPos    = float4(m_Camera.GetPos(), 0.f);
-        GConst.DrawMode     = m_DrawMode;
-        GConst.MaxRayLength = 100.f;
-        GConst.AmbientLight = 0.1f;
+        GConst.ViewProj        = ViewProj.Transpose();
+        GConst.ViewProjInv     = ViewProj.Inverse().Transpose();
+        GConst.LightDir        = normalize(-m_LightDir);
+        GConst.CameraPos       = float4(m_Camera.GetPos(), 0.f);
+        GConst.DrawMode        = m_DrawMode;
+        GConst.MaxRayLength    = 100.f;
+        GConst.AmbientLight    = 0.1f;
+        GConst.Time            = static_cast<float>(m_CurrentTime); // <--- Aquí se añade
+        GConst.WaterMaterialId = m_WaterMaterialId;
         m_pImmediateContext->UpdateBuffer(m_Constants, 0, static_cast<Uint32>(sizeof(GConst)), &GConst, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
 
         // Update transformation for scene objects
@@ -947,6 +1031,7 @@ void Tutorial22_HybridRendering::Render()
     }
 }
 
+
 void Tutorial22_HybridRendering::Update(double CurrTime, double ElapsedTime)
 {
     SampleBase::Update(CurrTime, ElapsedTime);
@@ -954,6 +1039,8 @@ void Tutorial22_HybridRendering::Update(double CurrTime, double ElapsedTime)
 
     const float dt = static_cast<float>(ElapsedTime);
 
+
+    m_CurrentTime += ElapsedTime;
     m_Camera.Update(m_InputController, dt);
 
     // Restrict camera movement
@@ -979,19 +1066,31 @@ void Tutorial22_HybridRendering::Update(double CurrTime, double ElapsedTime)
 
         RotationSpeed *= 1.5f;
     }
-    //Se aplica la trnasformada
-    Uint32 CuboIndex = 0;
-    auto&  Obj       = m_Scene.Objects[CuboIndex];
 
-    // 1. Obtén la matriz actual (transpuesta porque se almacena así)
-    float4x4 ModelMat = Obj.ModelMat.Transpose();
+    // Actualizar posición del cubo móvil con efecto de ondas
+    if (!m_Scene.DynamicObjects.empty())
+    {
+        auto& DynObj = m_Scene.DynamicObjects[0];
+        auto& Obj    = m_Scene.Objects[DynObj.ObjectAttribsIndex];
 
-    // 2. Aplica una nueva transformación
-    ModelMat = float4x4::Scale(5.0f, 0.2f, 6.0f);
+        // Calcular efecto de ondas en la posición del cubo
+        float time  = static_cast<float>(CurrTime);
+        float waveY = sin(m_MovableCubePos.x * 0.5 + time * 1.5) * 0.2 +
+            sin(m_MovableCubePos.z * 0.8 + time * 2.0) * 0.15;
 
-    // 3. Actualiza la matriz en el objeto (transponer de nuevo)
-    Obj.ModelMat  = ModelMat.Transpose();
-    Obj.NormalMat = Obj.ModelMat; // Actualiza la matriz normal también
+        // Mantener el cubo ligeramente sobre el agua
+        m_MovableCubePos.y = waveY + 0.5f;
+
+        // Actualizar matriz de transformación
+        auto ModelMat = float4x4::Translation(m_MovableCubePos) *
+            float4x4::RotationX(m_MovableCubeRot.x) *
+            float4x4::RotationY(m_MovableCubeRot.y) *
+            float4x4::RotationZ(m_MovableCubeRot.z) *
+            float4x4::Scale(m_MovableCubeScale);
+
+        Obj.ModelMat  = ModelMat.Transpose();
+        Obj.NormalMat = float4x3{ModelMat.Inverse().Transpose()};
+    }
 }
 
 void Tutorial22_HybridRendering::WindowResize(Uint32 Width, Uint32 Height)
@@ -1085,6 +1184,11 @@ void Tutorial22_HybridRendering::UpdateUI()
                 m_LightDir   = normalize(m_LightDir);
             }
         }
+        ImGui::Separator();
+        ImGui::Text("Controles del Cubo");
+        ImGui::DragFloat3("Posicion", &m_MovableCubePos.x, 0.1f);
+        ImGui::DragFloat3("Rotacion", &m_MovableCubeRot.x, 0.01f, -PI_F, PI_F);
+        ImGui::DragFloat3("Escala", &m_MovableCubeScale.x, 0.1f, 0.1f, 10.0f);
     }
     ImGui::End();
 }

@@ -14,10 +14,14 @@ struct GlobalConstants
     float4 LightDir;
     float4 CameraPos;
 
+    float Time;
+
     int   DrawMode;
     float MaxRayLength;
     float AmbientLight;
     int   padding0;
+    uint   WaterMaterialId;
+    float WaveAmplitude;
 };
 
 struct ObjectConstants
@@ -59,9 +63,14 @@ struct MaterialAttribs
     float  Reflectivity;     // Intensidad de reflejos
     float  Transparency;     // Transparencia del material
     float  FresnelPower;     // Control del efecto Fresnel
+    float RefractiveIndex;
+    float  WaveSpeed;
     uint   padding0;
     uint   padding1;
 };
+
+
+
 
 // Small offset between ray intersection and new ray origin to avoid self-intersections.
 #define SMALL_OFFSET 0.0001

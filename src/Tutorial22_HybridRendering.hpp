@@ -115,6 +115,12 @@ private:
     RefCntAutoPtr<IPipelineState>         m_PostProcessPSO;
     RefCntAutoPtr<IShaderResourceBinding> m_PostProcessSRB;
 
+    // En la sección privada de la clase
+    float3 m_MovableCubePos   = float3{0.0f, 1.0f, 0.0f};
+    float3 m_MovableCubeRot   = float3{0.0f, 0.0f, 0.0f};
+    float3 m_MovableCubeScale = float3{1.0f, 1.0f, 1.0f};
+    Uint32 m_MovableCubeIndex = 0;
+
     // Simple implementation of a mesh
     struct Mesh
     {
