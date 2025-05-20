@@ -3,47 +3,62 @@
 
 ConstantBuffer<GlobalConstants> g_Constants;
 
-Texture2D g_GBuffer_Color;
-Texture2D g_GBuffer_Normal;
-Texture2D g_GBuffer_Depth;
-Texture2D g_RayTracedTex;
+Texture2D    g_GBuffer_Color;
+Texture2D    g_GBuffer_Normal;
+Texture2D    g_GBuffer_Depth;
+Texture2D    g_RayTracedTex;
 
 struct PSInput { 
     float4 Pos : SV_POSITION; 
     float2 UV  : TEX_COORD; 
 };
 
-float4 main(in PSInput PSIn) : SV_Target {
-    float2 Dim;
+float4 main(in PSInput PSIn) : SV_Target 
+{
+    uint2 Dim;
     g_GBuffer_Color.GetDimensions(Dim.x, Dim.y);
+    
     float2 ScreenUV = float2(PSIn.UV.x, 1.0 - PSIn.UV.y);
-    int3 TexelPos = int3(ScreenUV * Dim, 0);
+    int3 TexelCoord = int3(ScreenUV * Dim - 0.5, 0); // Corrección de offset
     
-    // Leer G-Buffer
-    float4 Color = g_GBuffer_Color.Load(TexelPos);
-    float4 NormalData = g_GBuffer_Normal.Load(TexelPos);
-    float Depth = g_GBuffer_Depth.Load(TexelPos).r;
+    float4 BaseColor    = g_GBuffer_Color.Load(TexelCoord);
+    float4 NormalData   = g_GBuffer_Normal.Load(TexelCoord);
+    float  Depth        = g_GBuffer_Depth.Load(TexelCoord).r;
     
-    // Decodificar datos
-    float3 Normal = normalize(NormalData.xyz * 2.0 - 1.0);
-    float Reflectivity = NormalData.w;
-    float3 WPos = ScreenPosToWorldPos(ScreenUV, Depth, g_Constants.ViewProjInv);
+    float3 WorldNormal  = normalize(NormalData.xyz * 2.0 - 1.0);
+    float  Reflectivity = saturate(NormalData.w); // Asegurar rango [0,1]
+    float3 WorldPos     = ScreenPosToWorldPos(ScreenUV, Depth, g_Constants.ViewProjInv);
     
-    // Cálculo de Fresnel
-    float R = 0.0;
-    if (Depth < 1.0) {
-        float3 ViewDir = normalize(g_Constants.CameraPos - WPos);
-        float NdotV = saturate(dot(Normal, ViewDir));
-        float R0 = lerp(0.04, Reflectivity, Reflectivity);
-        R = lerp(R0, 1.0, pow(1.0 - NdotV, 5.0));
-    } else {
-        Color.rgb = GetSkyColor(normalize(WPos - g_Constants.CameraPos), g_Constants.LightDir.xyz);
+    float4 FinalColor = BaseColor;
+    
+    if (Depth < 1.0)
+    {
+        float3 ViewDir = normalize(g_Constants.CameraPos.xyz - WorldPos);
+        float NdotV = saturate(dot(WorldNormal, ViewDir));
+        float Fresnel = pow(1.0 - NdotV, 5.0);
+        float FresnelFactor = lerp(0.04, Reflectivity, Fresnel);
+        
+        float4 RayTracedColor = g_RayTracedTex.Load(TexelCoord);
+        float BlendFactor = saturate(FresnelFactor * Reflectivity);
+        
+        if (Reflectivity < 0.5)
+        {
+            FinalColor.rgb = lerp(BaseColor.rgb, RayTracedColor.rgb, BlendFactor);
+        }
+        else
+        {
+            float waterTransparency = saturate(RayTracedColor.a * 2.0); // Ajuste de intensidad
+            FinalColor.rgb = lerp(BaseColor.rgb, RayTracedColor.rgb, waterTransparency);
+            FinalColor.a = BaseColor.a * (1.0 - waterTransparency);
+        }
+    }
+    else
+    {
+        float3 SkyDir = normalize(WorldPos - g_Constants.CameraPos.xyz); // Dirección corregida
+        float3 SkyColor = GetSkyColor(SkyDir, g_Constants.LightDir.xyz).rgb;
+        float4 RayTracedColor = g_RayTracedTex.Load(TexelCoord);
+        FinalColor.rgb = lerp(SkyColor, RayTracedColor.rgb, RayTracedColor.a);
     }
 
-    // Aplicar reflejos ray tracing solo en materiales no acuáticos
-    float4 RTColor = g_RayTracedTex.Load(TexelPos);
-    float blendFactor = Reflectivity > 0.5 ? 0.0 : R * Reflectivity;
-    Color.rgb = lerp(Color.rgb, RTColor.rgb, blendFactor);
-
-    return Color;
+    return FinalColor;
 }

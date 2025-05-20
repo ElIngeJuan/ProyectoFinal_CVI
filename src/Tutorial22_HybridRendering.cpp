@@ -99,7 +99,7 @@ void Tutorial22_HybridRendering::CreateSceneMaterials(uint2& CubeMaterialRange, 
         Materials.push_back(NoTextureMaterial);
     };
 
-    const auto CreateWaterMaterial = [&](const char* NormalMapName, Uint32 SamplerInd) {
+    const auto CreateWaterMaterial = [&](const char* NormalMapName, const char* CausticsTexName,Uint32 SamplerInd) {
         // Cargar normal map
         TextureLoadInfo loadInfo;
         loadInfo.IsSRGB       = false; // Los normal maps no usan sRGB
@@ -107,23 +107,39 @@ void Tutorial22_HybridRendering::CreateSceneMaterials(uint2& CubeMaterialRange, 
         RefCntAutoPtr<ITexture> NormalTex;
         CreateTextureFromFile(NormalMapName, loadInfo, m_pDevice, &NormalTex);
         VERIFY_EXPR(NormalTex);
+        RefCntAutoPtr<ITexture> CausticsTex;
+        CreateTextureFromFile(CausticsTexName, loadInfo, m_pDevice, &CausticsTex);
 
         HLSL::MaterialAttribs mtr;
         mtr.SampInd         = SamplerInd;
         mtr.BaseColorMask   = float4{0.1f, 0.3f, 0.8f, 0.5f};            // Color base azulagua
         mtr.BaseColorTexInd = -1;                                        // Sin textura de color
         mtr.NormalMapTexInd = static_cast<int>(m_Scene.Textures.size()); // Índice del normal map
+        mtr.CausticsTexInd  = static_cast<int>(m_Scene.Textures.size());
         m_Scene.Textures.push_back(NormalTex);
-        mtr.Reflectivity    = 0.7f;
-        mtr.Transparency    = 0.8f;  // Nivel de transparencia
-        mtr.RefractiveIndex = 1.33f; // Índice de refracción del agua
-        mtr.FresnelPower    = 5.0f;
+        mtr.RefractiveIndex = 1.33; // Agua
+        mtr.FresnelBias     = 0.04; // Base para materiales dieléctricos
+        mtr.FresnelPower    = 5.0;  // Transición Fresnel suave
+        mtr.Transparency    = 0.89; // Transparencia base
+        mtr.Reflectivity    = 0.85f;
+        mtr.CausticsSpeed   = 0.2f; // Velocidad de animación
+        mtr.CausticsScale   = 0.1f; // Escala de los caustics
+        mtr.AbsorptionCoefficient = 0.15f;                      // Cuánta luz absorbe el agua
+        mtr.DepthColor            = float3(0.0f, 0.15f, 0.25f); // Color en profundidad
+        mtr.FogDensity            = 0.05f;                      // Densidad de niebla
+        mtr.FogColor              = float3(0.4f, 0.6f, 0.8f);   // Color de la niebla
+        mtr.WaveSpeed             = 0.1f;                       // Velocidad de animación de ondas
+        mtr.MaxDepth     = 15.0f;                      // Máxima profundidad para efectos
+        mtr.ShallowDepth = 2.0f;                       // Profundidad de transición
+        mtr.ShallowColor = float3(0.3f, 0.8f, 0.9f);   // Agua cristalina
+        mtr.DeepColor    = float3(0.0f, 0.1f, 0.3f);   // Azul profundo
+        mtr.DepthFalloff = 2.0f;                       // Suavidad de transición
         Materials.push_back(mtr);
     };
 
     // Material de agua
     CubeMaterialRange.x = static_cast<Uint32>(Materials.size());
-    CreateWaterMaterial("WaterNormalMap.png", AnisotropicWrapSampInd);
+    CreateWaterMaterial("WaterNormalMap.png", "caustics.jpg" ,AnisotropicWrapSampInd);
 
     // Ground material
     GroundMaterial = static_cast<Uint32>(Materials.size());
@@ -363,6 +379,21 @@ void Tutorial22_HybridRendering::CreateSceneObjects(const uint2 CubeMaterialRang
         false, // No es dinámico
         3      // ID del material (ej. piedra)
     );
+
+    // Dentro de CreateSceneObjects, después de crear las paredes
+    m_CubePos = float3(0.0f, 1.0f, 0.0f);
+    AddCubeObject(
+        0.0f,             // Sin rotación
+        m_CubePos.x,      // Posición X inicial
+        m_CubePos.y,      // Posición Y inicial
+        m_CubePos.z,      // Posición Z inicial
+        1.0f, 1.0f, 1.0f, // Escala 1x1x1
+        false,            // No es dinámico (se controla manualmente)
+        2                 // ID de material (ej. color sólido)
+    );
+    m_ControlledCubeIndex = static_cast<Uint32>(m_Scene.Objects.size() - 1);
+
+
 
     // 3. Agua encima (plano flotante)
     auto         waterMesh   = CreateTexturedPlaneMesh(m_pDevice, float2{20});
@@ -1035,6 +1066,7 @@ void Tutorial22_HybridRendering::Render()
 void Tutorial22_HybridRendering::Update(double CurrTime, double ElapsedTime)
 {
     SampleBase::Update(CurrTime, ElapsedTime);
+    m_LastElapsedTime = ElapsedTime;
     UpdateUI();
 
     const float dt = static_cast<float>(ElapsedTime);
@@ -1067,30 +1099,7 @@ void Tutorial22_HybridRendering::Update(double CurrTime, double ElapsedTime)
         RotationSpeed *= 1.5f;
     }
 
-    // Actualizar posición del cubo móvil con efecto de ondas
-    if (!m_Scene.DynamicObjects.empty())
-    {
-        auto& DynObj = m_Scene.DynamicObjects[0];
-        auto& Obj    = m_Scene.Objects[DynObj.ObjectAttribsIndex];
 
-        // Calcular efecto de ondas en la posición del cubo
-        float time  = static_cast<float>(CurrTime);
-        float waveY = sin(m_MovableCubePos.x * 0.5 + time * 1.5) * 0.2 +
-            sin(m_MovableCubePos.z * 0.8 + time * 2.0) * 0.15;
-
-        // Mantener el cubo ligeramente sobre el agua
-        m_MovableCubePos.y = waveY + 0.5f;
-
-        // Actualizar matriz de transformación
-        auto ModelMat = float4x4::Translation(m_MovableCubePos) *
-            float4x4::RotationX(m_MovableCubeRot.x) *
-            float4x4::RotationY(m_MovableCubeRot.y) *
-            float4x4::RotationZ(m_MovableCubeRot.z) *
-            float4x4::Scale(m_MovableCubeScale);
-
-        Obj.ModelMat  = ModelMat.Transpose();
-        Obj.NormalMat = float4x3{ModelMat.Inverse().Transpose()};
-    }
 }
 
 void Tutorial22_HybridRendering::WindowResize(Uint32 Width, Uint32 Height)
@@ -1184,11 +1193,55 @@ void Tutorial22_HybridRendering::UpdateUI()
                 m_LightDir   = normalize(m_LightDir);
             }
         }
+        float3      moveDir = float3(0.0f);
+        const auto& io      = ImGui::GetIO();
+
+        // Configuración clara de controles
+        if (!io.WantCaptureKeyboard)
+        {
+            // Mapeo de teclas más intuitivo
+            const bool moveForward  = ImGui::IsKeyDown(ImGuiKey_I);
+            const bool moveBackward = ImGui::IsKeyDown(ImGuiKey_K);
+            const bool moveLeft     = ImGui::IsKeyDown(ImGuiKey_J);
+            const bool moveRight    = ImGui::IsKeyDown(ImGuiKey_L);
+            const bool moveUp       = ImGui::IsKeyDown(ImGuiKey_U);
+            const bool moveDown     = ImGui::IsKeyDown(ImGuiKey_O);
+
+            // Calculamos cada componente por separado para mayor claridad
+            moveDir.x = (moveRight ? 1.0f : 0.0f) - (moveLeft ? 1.0f : 0.0f);
+            moveDir.z = (moveForward ? 1.0f : 0.0f) - (moveBackward ? 1.0f : 0.0f);
+            moveDir.y = (moveUp ? 1.0f : 0.0f) - (moveDown ? 1.0f : 0.0f);
+        }
+
+        // Movimiento suavizado y con deltaTime correcto
+        if (length(moveDir) > 0.0f)
+        {
+            // Normalizamos manteniendo la velocidad constante en diagonales
+            moveDir = normalize(moveDir);
+
+            // Aplicamos movimiento con tiempo delta preciso
+            const float deltaTime = static_cast<float>(m_LastElapsedTime);
+            m_CubePos += moveDir * m_CubeSpeed * deltaTime;
+
+            // Actualización eficiente de la matriz
+            if (m_ControlledCubeIndex >= 0 &&
+                m_ControlledCubeIndex < static_cast<int>(m_Scene.Objects.size()))
+            {
+                auto& obj     = m_Scene.Objects[m_ControlledCubeIndex];
+                obj.ModelMat  = float4x4::Translation(m_CubePos).Transpose();
+                obj.NormalMat = float3x3::Identity(); // Mantenemos orientación original
+            }
+        }
+
+        // Display mejorado
         ImGui::Separator();
-        ImGui::Text("Controles del Cubo");
-        ImGui::DragFloat3("Posicion", &m_MovableCubePos.x, 0.1f);
-        ImGui::DragFloat3("Rotacion", &m_MovableCubeRot.x, 0.01f, -PI_F, PI_F);
-        ImGui::DragFloat3("Escala", &m_MovableCubeScale.x, 0.1f, 0.1f, 10.0f);
+        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.8f, 1.0f), "Controles Actuales:");
+        ImGui::BulletText("I/K: Avanzar/Retroceder");
+        ImGui::BulletText("J/L: Izquierda/Derecha");
+        ImGui::BulletText("U/O: Ascender/Descender");
+        ImGui::Text("Posición Actual: [X: %6.2f, Y: %6.2f, Z: %6.2f]",
+                    m_CubePos.x, m_CubePos.y, m_CubePos.z);
+    
     }
     ImGui::End();
 }

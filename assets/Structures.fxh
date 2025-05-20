@@ -5,6 +5,7 @@
 #define RENDER_MODE_DIFFUSE_LIGHTING 3
 #define RENDER_MODE_REFLECTIONS      4
 #define RENDER_MODE_FRESNEL_TERM     5
+#define INVALID_MATERIAL_ID 0xFFFFFFFF
 
 struct GlobalConstants
 {
@@ -22,6 +23,7 @@ struct GlobalConstants
     int   padding0;
     uint   WaterMaterialId;
     float WaveAmplitude;
+    float FresnelBias;
 };
 
 struct ObjectConstants
@@ -64,7 +66,20 @@ struct MaterialAttribs
     float  Transparency;     // Transparencia del material
     float  FresnelPower;     // Control del efecto Fresnel
     float RefractiveIndex;
+    float  FresnelBias;
     float  WaveSpeed;
+    int   CausticsTexInd;
+    float CausticsScale;
+    float CausticsSpeed;
+    float  AbsorptionCoefficient; 
+    float3 DepthColor;           
+    float  FogDensity;           
+    float3 FogColor;              
+    float  MaxDepth;          
+    float  ShallowDepth;       
+    float3 ShallowColor;      
+    float3 DeepColor;         
+    float  DepthFalloff;      
     uint   padding0;
     uint   padding1;
 };

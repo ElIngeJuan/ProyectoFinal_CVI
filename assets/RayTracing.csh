@@ -228,7 +228,6 @@ END_SHADER_DECLARATION(CSMain, 8, 8)
     if (DTid.x >= Dim.x || DTid.y >= Dim.y)
         return;
 
-    // Early exit for background objects
     float  Depth = TextureLoad(g_GBuffer_Depth, DTid).x;
     if (Depth == 1.0)
     {
@@ -236,50 +235,120 @@ END_SHADER_DECLARATION(CSMain, 8, 8)
         return;
     }
 
-    float3 WPos        = ScreenPosToWorldPos((float2(DTid) + float2(0.5, 0.5)) / float2(Dim), Depth, g_Constants.ViewProjInv);
+    float3 WPos        = ScreenPosToWorldPos((float2(DTid) + 0.5) / float2(Dim), Depth, g_Constants.ViewProjInv);
     float3 LightDir    = g_Constants.LightDir.xyz;
-    float3 ViewRayDir  = WPos.xyz - g_Constants.CameraPos.xyz;
-    float  DisToCamera = length(ViewRayDir);
-    ViewRayDir        /= DisToCamera;
-    float4 Color       = float4(0.0, 0.0, 0.0, 1.0);
-    float3 WNormal     = normalize(TextureLoad(g_GBuffer_Normal, DTid).xyz);
+    float3 ViewRayDir  = normalize(WPos - g_Constants.CameraPos.xyz);
+    float4 NormData    = TextureLoad(g_GBuffer_Normal, DTid);
+    float3 WNormal     = normalize(NormData.xyz * 2.0 - 1.0);
+    float  Reflectivity= NormData.a;
     float  NdotL       = max(0.0, dot(LightDir, WNormal));
+    float4 Color       = float4(0.0, 0.0, 0.0, 1.0);
 
     // Cast shadow
     if (NdotL > 0.0)
     {
-        NdotL *= CastShadow(WPos.xyz + WNormal.xyz * SMALL_OFFSET * DisToCamera,
-                            LightDir,
-                            g_Constants.MaxRayLength,
-                            g_TLAS);
+        float DisToCamera = distance(WPos, g_Constants.CameraPos.xyz);
+        NdotL *= CastShadow(WPos + WNormal * SMALL_OFFSET * DisToCamera,
+                          LightDir,
+                          g_Constants.MaxRayLength,
+                          g_TLAS);
     }
 
-    // Reflection
+   if (Reflectivity > 0.0 && g_Constants.WaterMaterialId != INVALID_MATERIAL_ID)
     {
-        ReflectionInputAttribs Attribs;
-        Attribs.Origin                 = WPos.xyz + WNormal.xyz * SMALL_OFFSET * DisToCamera;
-        Attribs.ReflectionRayDir       = reflect(ViewRayDir, WNormal);
-        Attribs.MaxReflectionRayLength = g_Constants.MaxRayLength;
-        Attribs.MaxShadowRayLength     = g_Constants.MaxRayLength;
-        Attribs.CameraPos              = g_Constants.CameraPos.xyz;
-        Attribs.LightDir               = LightDir;
+        MaterialAttribs waterMaterial = g_MaterialAttribs[g_Constants.WaterMaterialId];
+        float3 ViewDir = normalize(g_Constants.CameraPos.xyz - WPos);
+        float3 IncomingDir = -ViewDir;
+        float NdotI = dot(WNormal, IncomingDir);
 
-        ReflectionResult Refl = Reflection(g_Textures,
-                                           g_Samplers,
-                                           g_VertexBuffer,
-                                           g_IndexBuffer,
-                                           g_ObjectAttribs,
-                                           g_MaterialAttribs,
-                                           g_TLAS,
-                                           Attribs);
+        // 1. Cálculo de Reflexión
+        ReflectionInputAttribs ReflAttribs;
+        ReflAttribs.Origin = WPos + WNormal * SMALL_OFFSET;
+        ReflAttribs.ReflectionRayDir = reflect(IncomingDir, WNormal);
+        ReflAttribs.MaxReflectionRayLength = g_Constants.MaxRayLength;
+        ReflAttribs.MaxShadowRayLength = g_Constants.MaxRayLength;
+        ReflAttribs.CameraPos = g_Constants.CameraPos.xyz;
+        ReflAttribs.LightDir = LightDir;
 
-        if (Refl.Found)
-            Color = Refl.BaseColor * max(g_Constants.AmbientLight, Refl.NdotL);
-        else
-            Color = GetSkyColor(Attribs.ReflectionRayDir, g_Constants.LightDir.xyz);
+        ReflectionResult Refl = Reflection(g_Textures, g_Samplers, g_VertexBuffer, 
+                                         g_IndexBuffer, g_ObjectAttribs, g_MaterialAttribs,
+                                         g_TLAS, ReflAttribs);
+
+        // 2. Cálculo de Refracción Corregida
+        ReflectionInputAttribs RefrAttribs;
+        float eta = (NdotI > 0.0) ? (1.0 / waterMaterial.RefractiveIndex) : waterMaterial.RefractiveIndex;
+        float3 RefractDir = refract(IncomingDir, WNormal, eta);
+
+        // Manejar reflexión interna total
+        if (length(RefractDir) < 0.001)
+        {
+            RefractDir = reflect(IncomingDir, WNormal);
+        }
+
+        RefrAttribs.Origin = WPos - WNormal * SMALL_OFFSET * sign(NdotI);
+        RefrAttribs.ReflectionRayDir = RefractDir;
+        RefrAttribs.MaxReflectionRayLength = g_Constants.MaxRayLength;
+        RefrAttribs.MaxShadowRayLength = g_Constants.MaxRayLength;
+        RefrAttribs.CameraPos = g_Constants.CameraPos.xyz;
+        RefrAttribs.LightDir = LightDir;
+
+        ReflectionResult Refr = Reflection(g_Textures, g_Samplers, g_VertexBuffer,
+                                         g_IndexBuffer, g_ObjectAttribs, g_MaterialAttribs,
+                                         g_TLAS, RefrAttribs);
+
+        // 3. Cálculo Fresnel Mejorado
+        float cosTheta = saturate(dot(IncomingDir, WNormal));
+        float fresnelFactor = pow(1.0 - cosTheta, waterMaterial.FresnelPower);
+        float Fresnel = lerp(waterMaterial.FresnelBias, 1.0, fresnelFactor);
+        Fresnel *= waterMaterial.Reflectivity;
+
+        // 4. Obtención de colores con fallbacks
+        float3 ReflectionColor = Refl.Found ? 
+            Refl.BaseColor.rgb * max(g_Constants.AmbientLight, Refl.NdotL) : 
+            GetSkyColor(ReflAttribs.ReflectionRayDir, LightDir).rgb;
+
+        float3 RefractionColor = Refr.Found ? 
+            lerp(waterMaterial.BaseColorMask.rgb, Refr.BaseColor.rgb, waterMaterial.Transparency) * 
+            max(g_Constants.AmbientLight, Refr.NdotL) : 
+            GetSkyColor(RefractDir, LightDir).rgb;
+
+        // 5. Mezcla Final con Efectos Complejos
+        Color.rgb = lerp(RefractionColor, ReflectionColor, Fresnel);
+    
+        // 6. Transparencia Adaptativa
+        Color.a = waterMaterial.Transparency * saturate(1.0 - Fresnel);
+    
+        // 7. Brillo Especular Físicamente Realista
+        float3 HalfVec = normalize(LightDir + ViewDir);
+        float Specular = pow(saturate(dot(WNormal, HalfVec)), 128.0);
+        Color.rgb += Specular * Fresnel * waterMaterial.Reflectivity * 
+                    lerp(1.0, Refr.BaseColor.a, waterMaterial.Transparency);
+
+        // 8. Ajuste Final de Color
+        Color.rgb = saturate(Color.rgb);
+        Color.a = lerp(Color.a, 1.0, Fresnel * 0.3);  // Aumentar opacidad en bordes
     }
+    else
+    {
+        // Materiales regulares
+        ReflectionInputAttribs ReflAttribs;
+        ReflAttribs.Origin                 = WPos + WNormal * SMALL_OFFSET;
+        ReflAttribs.ReflectionRayDir       = reflect(-ViewRayDir, WNormal);
+        ReflAttribs.MaxReflectionRayLength = g_Constants.MaxRayLength;
+        ReflAttribs.MaxShadowRayLength     = g_Constants.MaxRayLength;
+        ReflAttribs.CameraPos              = g_Constants.CameraPos.xyz;
+        ReflAttribs.LightDir               = LightDir;
 
-    Color.a = max(g_Constants.AmbientLight, NdotL);
+        ReflectionResult Refl = Reflection(g_Textures, g_Samplers, g_VertexBuffer,
+                                         g_IndexBuffer, g_ObjectAttribs, g_MaterialAttribs,
+                                         g_TLAS, ReflAttribs);
+
+        Color = Refl.Found ? 
+            Refl.BaseColor * max(g_Constants.AmbientLight, Refl.NdotL) : 
+            GetSkyColor(ReflAttribs.ReflectionRayDir, LightDir);
+        
+        Color.a = max(g_Constants.AmbientLight, NdotL);
+    }
 
     TextureStore(g_RayTracedTex, DTid, Color);
 }
