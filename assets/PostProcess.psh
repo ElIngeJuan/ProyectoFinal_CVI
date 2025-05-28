@@ -55,7 +55,7 @@ float4 main(in PSInput PSIn) : SV_Target
     else
     {
         float3 SkyDir = normalize(WorldPos - g_Constants.CameraPos.xyz); // Dirección corregida
-        float3 SkyColor = GetSkyColor(SkyDir, g_Constants.LightDir.xyz).rgb;
+        float3 SkyColor = GetSkyColor(SkyDir, g_Constants.LightDir.xyz);
         float4 RayTracedColor = g_RayTracedTex.Load(TexelCoord);
         FinalColor.rgb = lerp(SkyColor, RayTracedColor.rgb, RayTracedColor.a);
     }

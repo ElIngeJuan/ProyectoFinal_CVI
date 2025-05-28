@@ -231,7 +231,14 @@ END_SHADER_DECLARATION(CSMain, 8, 8)
     float  Depth = TextureLoad(g_GBuffer_Depth, DTid).x;
     if (Depth == 1.0)
     {
-        TextureStore(g_RayTracedTex, DTid, float4(0.0, 0.0, 0.0, 1.0));
+        // Calcular dirección del cielo correctamente
+        float2 ScreenUV = (float2(DTid) + 0.5) / float2(Dim);
+        float3 WPos = ScreenPosToWorldPos(ScreenUV, 1.0, g_Constants.ViewProjInv);
+        float3 SkyDir = normalize(WPos - g_Constants.CameraPos.xyz);
+    
+        // Obtener color del cielo y almacenarlo
+        float3 SkyColor = GetSkyColor(SkyDir, g_Constants.LightDir.xyz);
+        TextureStore(g_RayTracedTex, DTid, float4(SkyColor, 1.0));
         return;
     }
 

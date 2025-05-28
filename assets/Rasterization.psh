@@ -8,6 +8,8 @@ Texture2D    g_Textures[NUM_TEXTURES];
 SamplerState g_Samplers[NUM_SAMPLERS];
 TextureCube  g_ReflectionMap;
 SamplerState g_ReflectionSampler;
+Texture2D<float> g_SceneDepth;
+SamplerState g_PointSampler;
 
 ConstantBuffer<GlobalConstants>   g_Constants;
 StructuredBuffer<MaterialAttribs> g_MaterialAttribs;
@@ -27,18 +29,30 @@ struct PSOutput
     float4 Norm  : SV_Target1;
 };
 
+float LinearizeDepth(float depth, float4x4 invViewProj)
+{
+    float4 clipPos = float4(2.0 * depth - 1.0, 0.0, 0.0, 1.0);
+    float4 viewPos = mul(invViewProj, clipPos);
+    viewPos.xyz /= viewPos.w;
+    return length(viewPos.xyz);
+}
+
 void main(in  PSInput  PSIn,
           out PSOutput PSOut)
 {
-    MaterialAttribs material = g_MaterialAttribs[PSIn.MatId];
+MaterialAttribs material = g_MaterialAttribs[PSIn.MatId];
     
     if (PSIn.MatId == g_Constants.WaterMaterialId)
     {
-        // 1. Cï¿½lculo de profundidad real
-        float waterSurfaceY = 0.0;
+        // 1. Cálculos de profundidad
+        float waterSurfaceY = g_Constants.WaterLevel;
         float actualDepth = max(waterSurfaceY - PSIn.WPos.y, 0.0);
-        float depthFactor = saturate(actualDepth / material.MaxDepth);
+        
+        float sceneDepth = g_SceneDepth.Sample(g_PointSampler, PSIn.UV);
+        sceneDepth = LinearizeDepth(sceneDepth, g_Constants.ViewProjInv);
+        float opticalDepth = min(actualDepth, sceneDepth);
 
+        // 2. Normales con perturbaciones
         float3 N = normalize(PSIn.Norm);
         float3 dPdx = ddx(PSIn.WPos.xyz);
         float3 dPdy = ddy(PSIn.WPos.xyz);
@@ -54,89 +68,79 @@ void main(in  PSInput  PSIn,
                 .Sample(g_Samplers[NonUniformResourceIndex(material.SampInd)], PSIn.UV + uvOffset).rgb;
             normalMap = normalize(normalMap * 2.0 - 1.0);
             
-            float depthAttenuation = 1.0 - saturate(actualDepth / 2.0);
-            normalMap.xy *= depthAttenuation;
+            float depthAttenuation = 1.0 - saturate(opticalDepth / 2.0);
+            normalMap.xy *= depthAttenuation * material.CausticsDistortion;
             normalMap = normalize(normalMap);
             
             float3x3 TBN = float3x3(T, B, N);
             N = normalize(mul(normalMap, TBN));
         }
 
-        // 4. Cï¿½lculos de direcciï¿½n
+        // 4. Direcciones de vista
         float3 viewDir = normalize(g_Constants.CameraPos.xyz - PSIn.WPos.xyz);
         float3 reflectDir = reflect(viewDir, N);
-        float eta = 1.0 / material.RefractiveIndex;
+        float eta = (dot(N, viewDir) > 0) ? (1.0 / material.RefractiveIndex) : material.RefractiveIndex;
         float3 refractDir = refract(viewDir, N, eta);
 
-        // 5. Distorsiï¿½n de refracciï¿½n
-        float distortionIntensity = lerp(0.1, 0.02, saturate(actualDepth / 2.0));
-        refractDir.xz += normalMap.xy * distortionIntensity;
-
-        // 6. Muestreo de reflexiones/refracciones
-        float4 reflectionColor = g_ReflectionMap.SampleLevel(g_ReflectionSampler, reflectDir, 0);
-        float4 refractionColor = g_ReflectionMap.SampleLevel(g_ReflectionSampler, refractDir, 0);
-
-        // 7. Fresnel mejorado
+        // 5. Cálculo Fresnel
         float cosTheta = saturate(dot(N, viewDir));
         float F0 = material.FresnelBias;
         float Fresnel = F0 + (1.0 - F0) * pow(1.0 - cosTheta, material.FresnelPower);
-        Fresnel *= material.Reflectivity * (1.0 - 0.5 * depthFactor);
+        Fresnel *= material.Reflectivity * (1.0 - 0.5 * saturate(opticalDepth / material.MaxDepth));
 
-        // 8. Color base con absorciï¿½n
-        float3 waterColor = lerp(material.ShallowColor, material.DeepColor, 
-                               smoothstep(0.0, 1.0, depthFactor * material.DepthFalloff));
-        float3 absorption = float3(0.3, 0.6, 0.1);
-        waterColor *= exp(-absorption * actualDepth);
-
-        // 9. Proyecciï¿½n de caustics en el fondo
+        // 6. Cálculo de caústicas (SOLO EN FONDO)
         float3 caustics = float3(0, 0, 0);
-        if (material.CausticsTexInd >= 0)
+        if (material.CausticsTexInd >= 0 && opticalDepth > 0.1)
         {
-            // Calcular posiciï¿½n del fondo (Y=0)
-            float3 floorPos = PSIn.WPos.xyz;
-            floorPos.y = 0.0;
+            // Calcular posición real del fondo
+            float3 floorPos = PSIn.WPos.xyz - viewDir * sceneDepth;
             
-            // Coordenadas de proyecciï¿½n
-            float2 causticsUV = floorPos.xz * material.CausticsScale + 
-                               float2(g_Constants.Time * material.CausticsSpeed, 
-                                    g_Constants.Time * material.CausticsSpeed * 0.7);
+            // Proyección en plano XZ del fondo
+            float2 causticsUV = floorPos.xz * material.CausticsScale;
             
-            // Muestreo con animaciï¿½n
+            // Animación y distorsión
+            float2 timeOffset = float2(
+                g_Constants.Time * material.CausticsSpeed,
+                g_Constants.Time * material.CausticsSpeed * 0.7
+            );
+            causticsUV += timeOffset + normalMap.xy * material.CausticsDistortion;
+            
+            // Muestreo con filtrado
             caustics = g_Textures[NonUniformResourceIndex(material.CausticsTexInd)]
                 .Sample(g_Samplers[NonUniformResourceIndex(material.SampInd)], causticsUV).rgb;
             
-            // Atenuaciï¿½n por profundidad y ï¿½ngulo
-            float viewAngle = 1.0 - saturate(dot(N, float3(0, 1, 0)));
-            caustics *= material.Reflectivity * 
-                       (1.0 - Fresnel) * 
-                       (1.0 - depthFactor) * 
-                       viewAngle;
+            // Atenuaciones
+            float depthAttenuation = saturate(opticalDepth / material.MaxDepth);
+            float viewAttenuation = 1.0 - saturate(dot(N, float3(0, 1, 0)));
+            caustics *= material.CausticsIntensity * depthAttenuation * viewAttenuation * (1.0 - Fresnel);
         }
 
-        // 10. Mezcla final
+        // 7. Color base y efectos
+        float3 waterColor = lerp(material.ShallowColor, material.DeepColor, 
+                               smoothstep(0.0, 1.0, opticalDepth * material.DepthFalloff));
+        waterColor *= exp(-opticalDepth * float3(0.3, 0.6, 0.1));
+
+        // 8. Muestreo de reflexiones/refracciones
+        float4 reflectionColor = g_ReflectionMap.SampleLevel(g_ReflectionSampler, reflectDir, 0);
+        float4 refractionColor = g_ReflectionMap.SampleLevel(g_ReflectionSampler, refractDir, 0);
+
+        // 9. Mezcla final
         float3 finalColor = lerp(
-            (waterColor + caustics) * refractionColor.rgb,
+            (waterColor * refractionColor.rgb + caustics), // Caústics solo en refracción
             reflectionColor.rgb,
             Fresnel
         );
 
-        // 11. Efectos adicionales
+        // 10. Efectos adicionales
         float3 lightDir = normalize(g_Constants.LightDir.xyz);
         float3 halfVec = normalize(viewDir + lightDir);
-        
-        // Scattering subsuperficial
-        float subsurface = pow(saturate(dot(-viewDir, lightDir)), 8.0) * 
-                          (1.0 - depthFactor) * material.Transparency;
-        finalColor += subsurface * material.ShallowColor;
-
-        // Specular
-        float specular = pow(saturate(dot(N, halfVec)), 256.0) * 
-                        Fresnel * (1.0 - depthFactor);
+        float specular = pow(saturate(dot(N, halfVec)), 256.0) * Fresnel;
         finalColor += specular * material.Reflectivity;
 
-        // 12. Transparencia
-        float alpha = material.Transparency * exp(-actualDepth * 0.5);
-        alpha *= 1.0 - Fresnel * 0.3;
+        // 11. Niebla y transparencia
+        float fogFactor = 1.0 - exp(-opticalDepth * material.FogDensity);
+        finalColor = lerp(finalColor, material.FogColor, fogFactor);
+        float alpha = material.Transparency * (1.0 - fogFactor) * (1.0 - Fresnel * 0.5);
 
         PSOut.Color = float4(saturate(finalColor), alpha);
         PSOut.Norm = float4(N * 0.5 + 0.5, material.Reflectivity);

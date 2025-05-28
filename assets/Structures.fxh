@@ -24,6 +24,8 @@ struct GlobalConstants
     uint   WaterMaterialId;
     float WaveAmplitude;
     float FresnelBias;
+    float  WaterLevel;
+    float3 FogColor; 
 };
 
 struct ObjectConstants
@@ -71,15 +73,17 @@ struct MaterialAttribs
     int   CausticsTexInd;
     float CausticsScale;
     float CausticsSpeed;
-    float  AbsorptionCoefficient; 
-    float3 DepthColor;           
-    float  FogDensity;           
-    float3 FogColor;              
-    float  MaxDepth;          
-    float  ShallowDepth;       
-    float3 ShallowColor;      
-    float3 DeepColor;         
-    float  DepthFalloff;      
+    float  AbsorptionCoefficient; // Nueva: coeficiente de absorción de luz
+    float3 DepthColor;            // Nueva: color en profundidad
+    float  FogDensity;            // Nueva: densidad de niebla submarina
+    float3 FogColor;              // Nueva: color de la niebla
+    float  MaxDepth;           // Profundidad máxima donde se aplican efectos (en unidades del mundo)
+    float  ShallowDepth;       // Profundidad donde empieza la transición color superficial/fondo
+    float3 ShallowColor;       // Color en aguas poco profundas
+    float3 DeepColor;          // Color en aguas profundas
+    float  DepthFalloff;       // Suavidad de la transición entre colores
+    float  CausticsIntensity;  // <-- Añadir
+    float  CausticsDistortion; // <-- Añadir
     uint   padding0;
     uint   padding1;
 };

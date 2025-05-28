@@ -120,7 +120,7 @@ void Tutorial22_HybridRendering::CreateSceneMaterials(uint2& CubeMaterialRange, 
         mtr.RefractiveIndex = 1.33; // Agua
         mtr.FresnelBias     = 0.04; // Base para materiales dieléctricos
         mtr.FresnelPower    = 5.0;  // Transición Fresnel suave
-        mtr.Transparency    = 0.89; // Transparencia base
+        mtr.Transparency    = 0.95f; // Transparencia base
         mtr.Reflectivity    = 0.85f;
         mtr.CausticsSpeed   = 0.2f; // Velocidad de animación
         mtr.CausticsScale   = 0.1f; // Escala de los caustics
@@ -134,6 +134,8 @@ void Tutorial22_HybridRendering::CreateSceneMaterials(uint2& CubeMaterialRange, 
         mtr.ShallowColor = float3(0.3f, 0.8f, 0.9f);   // Agua cristalina
         mtr.DeepColor    = float3(0.0f, 0.1f, 0.3f);   // Azul profundo
         mtr.DepthFalloff = 2.0f;                       // Suavidad de transición
+        mtr.CausticsIntensity     = 1.5f;                       // Intensidad de caustics
+        mtr.CausticsDistortion    = 0.1f;                       // Fuerza de distorsión
         Materials.push_back(mtr);
     };
 
@@ -975,6 +977,7 @@ void Tutorial22_HybridRendering::Render()
         GConst.AmbientLight    = 0.1f;
         GConst.Time            = static_cast<float>(m_CurrentTime); // <--- Aquí se añade
         GConst.WaterMaterialId = m_WaterMaterialId;
+        GConst.WaterLevel      = 0.0f;
         m_pImmediateContext->UpdateBuffer(m_Constants, 0, static_cast<Uint32>(sizeof(GConst)), &GConst, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
 
         // Update transformation for scene objects
@@ -1241,6 +1244,8 @@ void Tutorial22_HybridRendering::UpdateUI()
         ImGui::BulletText("U/O: Ascender/Descender");
         ImGui::Text("Posición Actual: [X: %6.2f, Y: %6.2f, Z: %6.2f]",
                     m_CubePos.x, m_CubePos.y, m_CubePos.z);
+
+
     
     }
     ImGui::End();
